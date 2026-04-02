@@ -21,7 +21,8 @@ bool chargerEnabled[2] = {false, false};
 bool emergencyStop = false;
 bool lastEmergencyStop = false;
 bool recoveryNeeded[2] = {false, false};
-unsigned long lastFaultMs[2] = {0, 0};
+unsigned long currentZeroSinceMs[2] = {0, 0};
+bool currentWasZero[2] = {false, false};
 
 // ---------------- OBJECTS ----------------
 JbdBms bms1(BAT1_SERIAL);
@@ -50,23 +51,45 @@ static const uint8_t LEFT_BATTERY_INDEX = 1;
 static const uint8_t RIGHT_BATTERY_INDEX = 0;
 
 bool isFaultActive(uint8_t index) {
-  if (index >= 2) {
+  if (index >= 2) return false;
+
+  const BmsData &data = cachedData[index];
+
+  // No fault if charger is off or battery not connected — reset timer
+  if (!chargerEnabled[index] || !data.isConnected) {
+    currentZeroSinceMs[index] = 0;
+    currentWasZero[index] = false;
     return false;
   }
 
-  const BmsData &data = cachedData[index];
-  const bool full =
-      data.isConnected && (data.soc >= MAX_STOP_SOC || data.voltage >= MAX_STOP_VOLTAGE);
-  const bool faultNow =
-      chargerEnabled[index] && data.isConnected && !full &&
-      (data.protectionStatus > 0 || data.current <= 0.0f);
-
-  if (faultNow) {
-    lastFaultMs[index] = millis();
+  // No fault if battery is full — reset timer
+  const bool full = (data.soc >= MAX_STOP_SOC || data.voltage >= MAX_STOP_VOLTAGE);
+  if (full) {
+    currentZeroSinceMs[index] = 0;
+    currentWasZero[index] = false;
+    return false;
   }
 
-  return chargerEnabled[index] && data.isConnected && lastFaultMs[index] != 0 &&
-         (millis() - lastFaultMs[index] < 10000UL);
+  // Immediate fault for BMS protection flags (over-voltage, over-current, etc.)
+  if (data.protectionStatus > 0) {
+    return true;
+  }
+
+  // Current is flowing — reset the zero-current timer, no fault
+  if (data.current > 0.0f) {
+    currentZeroSinceMs[index] = 0;
+    currentWasZero[index] = false;
+    return false;
+  }
+
+  // Current is 0: start the timer on the first zero reading
+  if (!currentWasZero[index]) {
+    currentWasZero[index] = true;
+    currentZeroSinceMs[index] = millis();
+  }
+
+  // Only report fault after current has been 0 for 15 seconds continuously
+  return (millis() - currentZeroSinceMs[index]) >= 15000UL;
 }
 
 // ======================================================
